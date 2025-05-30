@@ -18,21 +18,9 @@ static msg_list device_slots[256];
 
 /* Per‐fd context: selected channel + censorship flag */
 typedef struct file_ctx {
-    msg_node *chan;
-    bool      censor;
+    msg_node *active_channel;
+    bool      censor_enabled;
 } file_ctx;
-
-/* open: allocate file_ctx */
-static int slot_open(struct inode *inode, struct file *filp)
-{
-    file_ctx *ctx = kmalloc(sizeof(*ctx), GFP_KERNEL);
-    if (!ctx)
-        return -ENOMEM;
-    ctx->chan   = NULL;
-    ctx->censor = false;
-    filp->private_data = ctx;
-    return 0;
-}
 
 /* release: free file_ctx */
 static int slot_release(struct inode *inode, struct file *filp)
@@ -41,98 +29,113 @@ static int slot_release(struct inode *inode, struct file *filp)
     return 0;
 }
 
-/* read: copy the stored message as-is */
-static ssize_t slot_read(struct file *filp, char __user *buf,
-                         size_t count, loff_t *off)
+/* open: allocate file_ctx */
+static int slot_open(struct inode *inode, struct file *filp)
 {
-    file_ctx *ctx = filp->private_data;
-    msg_node *m    = ctx->chan;
+    file_ctx *ctx = kmalloc(sizeof(*ctx), GFP_KERNEL);
+    if (!ctx)
+        return -ENOMEM;
+    ctx->active_channel   = NULL;
+    ctx->censor_enabled = false;
+    filp->private_data = ctx;
+    return 0;
+}
+
+
+
+
+/* read: copy the stored message as-is */
+static ssize_t slot_read(struct file *file, char __user *buffer,
+                         size_t count, loff_t *offset)
+{
+    file_ctx *ctx = file->private_data;
+    msg_node *msg = ctx->active_channel;
     int  i;
 
-    if (!buf || !m)
+    if (!buffer || !msg)
         return -EINVAL;
-    if (m->length == 0)
+    if (msg->length == 0)
         return -EWOULDBLOCK;
-    if (m->length > count)
+    if (msg-> length > count)
         return -ENOSPC;
 
-    for (i = 0; i < m->length; i++)
-        if (put_user(m->data[i], &buf[i]))
+    for (i = 0; i < msg->length; i++)
+        if (put_user(msg->data[i], &buffer[i]))
             return -EFAULT;
 
-    return m->length;
+    return msg->length;
 }
 
 /* write: optionally censor, then store */
-static ssize_t slot_write(struct file *filp, const char __user *buf,
+static ssize_t slot_write(struct file *filp, const char __user *buffer,
                           size_t count, loff_t *off)
 {
     file_ctx *ctx = filp->private_data;
-    msg_node *m    = ctx->chan;
-    char temp[MAX_MSG_LEN];
+    msg_node *msg    = ctx->active_channel;
     int i;
+    char temp[MAX_MSG_LEN];
 
-    if (!buf || !m)
+    if (!buffer || !msg)
         return -EINVAL;
     if (count == 0 || count > MAX_MSG_LEN)
         return -EMSGSIZE;
+    
 
-    /* copy into temp */
     for (i = 0; i < count; i++) {
-        if (get_user(temp[i], &buf[i]))
+        if (get_user(temp[i], &buffer[i]))
             return -EFAULT;
         /* apply censorship if enabled: every 3rd byte (0-based idx %3 ==2) */
-        if (ctx->censor && (i % 3) == 2)
+        if (ctx->censor_enabled && (i % 3) == 2)
             temp[i] = '#';
     }
 
     /* commit */
-    m->length = count;
+    msg->length = count;
     for (i = 0; i < count; i++)
-        m->data[i] = temp[i];
+        msg->data[i] = temp[i];
 
     return count;
 }
 
-/* ioctl: handle SET_CEN and SET_CH */
+/* Handle IOCTL operations */
 static long slot_ioctl(struct file *filp,
-                       unsigned int cmd, unsigned long arg)
+                       unsigned int command, unsigned long val)
 {
     file_ctx *ctx = filp->private_data;
-    msg_node *cur, *prev = NULL, *newn;
+    msg_node *current, *previous = NULL, *newn;
     int minor = iminor(filp->f_inode);
 
-    switch (cmd) {
+    switch (command) {
     case IOCTL_SET_CEN:
-        if (arg > 1)
+        if (val > 1)
             return -EINVAL;
-        ctx->censor = (arg == 1);
+        ctx->censor_enabled = (arg == 1);
         return OKAY;
 
 
     case IOCTL_SET_CH:
-        if (arg == 0)
+        if (val == 0)
             return -EINVAL;
         /* find or create channel */
-        cur = device_slots[minor].head;
-        while (cur && cur->id != arg) {
-            prev = cur;
-            cur  = cur->next;
+        current = device_slots[minor].head;
+        while (current && current->id != arg) {
+            previous = current;
+            current  = current->next;
         }
-        if (!cur) {
+        if (!val) {
             newn = kmalloc(sizeof(*newn), GFP_KERNEL);
             if (!newn)
                 return -ENOMEM;
             newn->id     = arg;
             newn->length = 0;
             newn->next   = NULL;
-            if (!prev)
+            if (!previous)
                 device_slots[minor].head = newn;
             else
                 prev->next = newn;
-            cur = newn;
+            current = newn;
         }
-        ctx->chan = cur;
+        ctx->active_channel = current;
         return OKAY;
 
     default:
@@ -151,25 +154,25 @@ static const struct file_operations fops = {
 
 static int __init slot_init(void)
 {
-    int i, rc = register_chrdev(MSGSLOT_MAJOR, DRIVER_NAME, &fops);
-    if (rc < 0)
-        return rc;
-    for (i = 0; i < 256; i++)
-        device_slots[i].head = NULL;
+    int idx, res = register_chrdev(MSGSLOT_MAJOR, DRIVER_NAME, &fops);
+    if (res < 0)
+        return res;
+    for (idx = 0; idx < 256; i++)
+        device_slots[idx].head = NULL;
     return OKAY;
 }
 
 static void __exit slot_exit(void)
 {
     int i;
-    msg_node *n, *tmp;
+    msg_node *next, *tmp;
     unregister_chrdev(MSGSLOT_MAJOR, DRIVER_NAME);
     for (i = 0; i < 256; i++) {
-        n = device_slots[i].head;
-        while (n) {
-            tmp = n->next;
-            kfree(n);
-            n = tmp;
+        next = device_slots[i].head;
+        while (next) {
+            tmp = next->next;
+            kfree(next);
+            next = tmp;
         }
     }
 }

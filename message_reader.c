@@ -1,4 +1,6 @@
-/* reader.c */
+#define EXIT_FAILURE 1
+#define EXIT_SUCCESS 0
+
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -6,38 +8,44 @@
 #include <stdlib.h>
 #include "message_slot.h"
 
+
+
+
 int main(int argc, char *argv[])
 {
-    int fd, len;
-    unsigned int ch;
-    char buf[MAX_MSG_LEN];
+    
+    unsigned int channel;
+    char buffer[MAX_MSG_LEN];
+    int file_description, length;
 
+    // Check for correct number of arguments
     if (argc != 3) {
         fprintf(stderr, "Usage: %s <device> <channel>\n", argv[0]);
-        return 1;
+        return EXIT_FAILURE;
     }
-    fd = open(argv[1], O_RDONLY);
-    if (fd < 0) {
+    file_description = open(argv[1], O_RDONLY);
+    if (file_description == -1) {
         perror("open");
-        return 1;
+        return EXIT_FAILURE;
     }
-    ch = atoi(argv[2]);
-    if (ioctl(fd, IOCTL_SET_CH, ch) < 0) {
+    channel = atoi(argv[2]);
+    if (ioctl(file_description, IOCTL_SET_CH, channel) == -1) {
         perror("ioctl");
-        close(fd);
-        return 1;
+        close(file_description);
+        return EXIT_FAILURE;
     }
-    len = read(fd, buf, MAX_MSG_LEN);
-    if (len < 0) {
+    length = read(file_description, buffer, MAX_MSG_LEN);
+    if (length < 0) {
         perror("read");
-        close(fd);
-        return 1;
+        close(file_description);
+        return EXIT_FAILURE;
     }
-    if (write(STDOUT_FILENO, buf, len) != len) {
+    ssize_t bytes_written = write(STDOUT_FILENO, buffer, length);
+    if (bytes_written != length) {
         perror("write");
-        close(fd);
-        return 1;
+        close(file_description);
+        return EXIT_FAILURE;
     }
-    close(fd);
-    return 0;
+    close(file_description);
+    return EXIT_SUCCESS;
 }
